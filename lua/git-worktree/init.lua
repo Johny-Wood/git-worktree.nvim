@@ -158,7 +158,6 @@ local function emit_before_change(op, metadata)
     for idx = 1, #before_change_callbacks do
         local callback = before_change_callbacks[idx]
         local proceed = callback(op, metadata)
-        print(proceed)
         if proceed == false then
             should_abort = true
             break -- Abort further processing if any callback returns false
@@ -562,6 +561,9 @@ M.update_current_buffer = function(prev_path)
 
     local bufnr = vim.fn.bufnr(final_path, true)
     vim.api.nvim_set_current_buf(bufnr)
+
+    -- load current file to buffer
+    vim.cmd.edit()
     return true
 end
 
