@@ -10,8 +10,6 @@ local action_state = require("telescope.actions.state")
 local conf = require("telescope.config").values
 local git_worktree = require("git-worktree")
 
-local force_next_deletion = false
-
 local get_worktree_path = function(prompt_bufnr)
     local selection = action_state.get_selected_entry(prompt_bufnr)
     return selection.path
@@ -25,92 +23,46 @@ local switch_worktree = function(prompt_bufnr)
     end
 end
 
-local toggle_forced_deletion = function()
-    -- redraw otherwise the message is not displayed when in insert mode
-    if force_next_deletion then
-        print("The next deletion will not be forced")
-        vim.fn.execute("redraw")
-    else
-        print("The next deletion will be forced")
-        vim.fn.execute("redraw")
-        force_next_deletion = true
-    end
-end
-
-local delete_success_handler = function()
-    force_next_deletion = false
-end
-
-local delete_failure_handler = function()
-    print("Deletion failed, use <C-f> to force the next deletion")
-end
-
-local ask_to_confirm_deletion = function(forcing)
-    if forcing then
-        return vim.fn.input("Force deletion of worktree? [y/n]: ")
-    end
-
-    return vim.fn.input("Delete worktree? [y/n]: ")
-end
-
-local confirm_deletion = function(forcing)
-    if not git_worktree._config.confirm_telescope_deletions then
-        return true
-    end
-
-    local confirmed = ask_to_confirm_deletion(forcing)
-
-    if string.sub(string.lower(confirmed), 0, 1) == "y" then
-        return true
-    end
-
-    print("Didn't delete worktree")
-    return false
-end
-
-local delete_worktree = function(prompt_bufnr)
-    if not confirm_deletion() then
-        return
-    end
-
+local delete_worktree = function(prompt_bufnr, force)
     local worktree_path = get_worktree_path(prompt_bufnr)
     actions.close(prompt_bufnr)
     if worktree_path ~= nil then
-        git_worktree.delete_worktree(worktree_path, force_next_deletion, {
-            on_failure = delete_failure_handler,
-            on_success = delete_success_handler,
-        })
+        git_worktree.delete_worktree(worktree_path, force)
     end
 end
 
-local create_input_prompt = function(cb)
-    --[[
-    local window = Window.centered({
-        width = 30,
-        height = 1
-    })
-    vim.api.nvim_buf_set_option(window.bufnr, "buftype", "prompt")
-    vim.fn.prompt_setprompt(window.bufnr, "Worktree Location: ")
-    vim.fn.prompt_setcallback(window.bufnr, function(text)
-        vim.api.nvim_win_close(window.win_id, true)
-        vim.api.nvim_buf_delete(window.bufnr, {force = true})
-        cb(text)
-    end)
+local create_input_prompt = function()
+    return vim.fn.input("Path to subtree > ")
+end
 
-    vim.api.nvim_set_current_win(window.win_id)
-    vim.fn.schedule(function()
-        vim.nvim_command("startinsert")
-    end)
-    --]]
-    --
+local use_current_worktree_as_base_prompt = function()
+    return vim.fn.confirm("Use current worktree as base?", "&Yes\n&No", 1) == 1
+end
 
-    local subtree = vim.fn.input("Path to subtree > ")
-    cb(subtree)
+local get_base_branch = function(opts, name, branch)
+    local base_branch_selection_opts = opts or {}
+    base_branch_selection_opts.attach_mappings = function()
+        actions.select_default:replace(function(prompt_bufnr, _)
+            local selected_entry = action_state.get_selected_entry()
+            local current_line = action_state.get_current_line()
+
+            actions.close(prompt_bufnr)
+
+            local base_branch = selected_entry ~= nil and selected_entry.value or current_line
+
+            git_worktree.create_worktree(name, branch, nil, base_branch)
+        end)
+
+        -- do we need to replace other default maps?
+
+        return true
+    end
+    require("telescope.builtin").git_branches(base_branch_selection_opts)
 end
 
 local create_worktree = function(opts)
-    opts = opts or {}
-    opts.attach_mappings = function()
+    local branch_selection_opts = opts or {}
+    branch_selection_opts.attach_mappings = function()
         actions.select_default:replace(function(prompt_bufnr, _)
             local selected_entry = action_state.get_selected_entry()
             local current_line = action_state.get_current_line()
@@ -123,19 +75,29 @@ local create_worktree = function(opts)
                 return
             end
 
-            create_input_prompt(function(name)
-                if name == "" then
-                    name = branch
+            local name = create_input_prompt()
+            if name == "" then
+                name = branch
+            end
+
+            local has_branch = git_worktree.has_branch(branch)
+
+            if not has_branch then
+                if use_current_worktree_as_base_prompt() then
+                    git_worktree.create_worktree(name, branch)
+                else
+                    get_base_branch(opts, name, branch)
                 end
+            else
                 git_worktree.create_worktree(name, branch)
-            end)
+            end
         end)
 
         -- do we need to replace other default maps?
 
         return true
     end
-    require("telescope.builtin").git_branches(opts)
+    require("telescope.builtin").git_branches(branch_selection_opts)
 end
 
 local telescope_git_worktree = function(opts)
@@ -160,8 +122,8 @@ local telescope_git_worktree = function(opts)
             local index = #results + 1
             for key, val in pairs(widths) do
                 if key == "path" then
-                    local new_path = utils.transform_path(opts, entry[key])
-                    local path_len = strings.strdisplaywidth(new_path or "")
+                    new_path = utils.transform_path(opts, entry[key])
+                    path_len = strings.strdisplaywidth(new_path or "")
                     widths[key] = math.max(val, path_len)
                 else
                     widths[key] = math.max(val, strings.strdisplaywidth(entry[key] or ""))
@@ -190,10 +152,9 @@ local telescope_git_worktree = function(opts)
     })
 
     local make_display = function(entry)
-        local path, _ = utils.transform_path(opts, entry.path)
         return displayer({
             { entry.branch, "TelescopeResultsIdentifier" },
-            { path },
+            { utils.transform_path(opts, entry.path) },
             { entry.sha },
         })
     end
@@ -214,10 +175,18 @@ local telescope_git_worktree = function(opts)
             attach_mappings = function(_, map)
                 action_set.select:replace(switch_worktree)
 
-                map("i", "<c-d>", delete_worktree)
-                map("n", "<c-d>", delete_worktree)
-                map("i", "<c-f>", toggle_forced_deletion)
-                map("n", "<c-f>", toggle_forced_deletion)
+                map("i", "<c-d>", function(prompt_bufnr)
+                    delete_worktree(prompt_bufnr)
+                end)
+                map("n", "<c-d>", function(prompt_bufnr)
+                    delete_worktree(prompt_bufnr)
+                end)
+                map("i", "<c-D>", function(prompt_bufnr)
+                    delete_worktree(prompt_bufnr, true)
+                end)
+                map("n", "<c-D>", function(prompt_bufnr)
+                    delete_worktree(prompt_bufnr, true)
+                end)
 
                 return true
             end,
@@ -227,7 +196,6 @@ end
 
 return require("telescope").register_extension({
     exports = {
-        git_worktree = telescope_git_worktree,
         git_worktrees = telescope_git_worktree,
         create_git_worktree = create_worktree,
     },
